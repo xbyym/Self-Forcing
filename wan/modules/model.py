@@ -3,6 +3,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diffusers.configuration_utils import ConfigMixin, register_to_config
 from diffusers.models.modeling_utils import ModelMixin
 from einops import repeat
@@ -158,7 +159,12 @@ class WanSelfAttention(nn.Module):
 
 class WanT2VCrossAttention(WanSelfAttention):
 
-    def forward(self, x, context, context_lens, crossattn_cache=None):
+    def forward(self,
+                x,
+                context,
+                context_lens,
+                crossattn_cache=None,
+                return_attn=False):
         r"""
         Args:
             x(Tensor): Shape [B, L1, C]
@@ -185,13 +191,28 @@ class WanT2VCrossAttention(WanSelfAttention):
             k = self.norm_k(self.k(context)).view(b, -1, n, d)
             v = self.v(context).view(b, -1, n, d)
 
-        # compute attention
-        x = flash_attention(q, k, v, k_lens=context_lens)
-
-        # output
-        x = x.flatten(2)
-        x = self.o(x)
-        return x
+        if return_attn:
+            q_t = q.transpose(1, 2)
+            k_t = k.transpose(1, 2)
+            v_t = v.transpose(1, 2)
+            attn_mask = None
+            if context_lens is not None:
+                k_len = k_t.size(2)
+                mask = (torch.arange(k_len, device=context_lens.device).view(1, 1, 1, -1)
+                        >= context_lens.view(b, 1, 1, 1))
+                attn_mask = mask
+            x, attn = F.scaled_dot_product_attention(
+                q_t, k_t, v_t, attn_mask=attn_mask, dropout_p=0.0,
+                is_causal=False, need_attn_weights=True)
+            x = x.transpose(1, 2)
+            x = x.flatten(2)
+            x = self.o(x)
+            return x, attn
+        else:
+            x = flash_attention(q, k, v, k_lens=context_lens)
+            x = x.flatten(2)
+            x = self.o(x)
+            return x
 
 
 class WanGanCrossAttention(WanSelfAttention):
