@@ -1,5 +1,7 @@
 from typing import List, Optional
 import torch
+import os
+import matplotlib.pyplot as plt
 
 from utils.wan_wrapper import WanDiffusionWrapper, WanTextEncoder, WanVAEWrapper
 
@@ -70,6 +72,10 @@ class CausalInferencePipeline(torch.nn.Module):
                 It is normalized to be in the range [0, 1].
         """
         batch_size, num_frames, num_channels, height, width = noise.shape
+        fps = getattr(self.args, "fps", 16)
+        interval = fps * 5
+        attn_dir = getattr(self.args, "attn_dir", "attention_maps")
+        os.makedirs(attn_dir, exist_ok=True)
         if not self.independent_first_frame or (self.independent_first_frame and initial_latent is not None):
             # If the first frame is independent and the first frame is provided, then the number of frames in the
             # noise should still be a multiple of num_frame_per_block
@@ -211,14 +217,30 @@ class CausalInferencePipeline(torch.nn.Module):
                     ).unflatten(0, denoised_pred.shape[:2])
                 else:
                     # for getting real output
-                    _, denoised_pred = self.generator(
-                        noisy_image_or_video=noisy_input,
-                        conditional_dict=conditional_dict,
-                        timestep=timestep,
-                        kv_cache=self.kv_cache1,
-                        crossattn_cache=self.crossattn_cache,
-                        current_start=current_start_frame * self.frame_seq_length
-                    )
+                    if current_start_frame % interval == 0:
+                        _, denoised_pred, attn = self.generator(
+                            noisy_image_or_video=noisy_input,
+                            conditional_dict=conditional_dict,
+                            timestep=timestep,
+                            kv_cache=self.kv_cache1,
+                            crossattn_cache=self.crossattn_cache,
+                            current_start=current_start_frame * self.frame_seq_length,
+                            return_attn=True
+                        )
+                        heatmap = attn.mean(dim=1)[0].detach().cpu().numpy()
+                        plt.imshow(heatmap)
+                        plt.savefig(os.path.join(attn_dir, f"attn_{current_start_frame:06d}.png"))
+                        plt.close()
+                        torch.save(attn.cpu(), os.path.join(attn_dir, f"attn_{current_start_frame:06d}.pt"))
+                    else:
+                        _, denoised_pred = self.generator(
+                            noisy_image_or_video=noisy_input,
+                            conditional_dict=conditional_dict,
+                            timestep=timestep,
+                            kv_cache=self.kv_cache1,
+                            crossattn_cache=self.crossattn_cache,
+                            current_start=current_start_frame * self.frame_seq_length
+                        )
 
             # Step 3.2: record the model's output
             output[:, current_start_frame:current_start_frame + current_num_frames] = denoised_pred
